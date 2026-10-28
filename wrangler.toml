@@ -1,0 +1,12 @@
+name = "cashier-pro"
+main = "worker.js"
+compatibility_date = "2026-10-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cashier-pro-db"
+database_id = "4b28d1c2-e5fa-43e5-b388-7eab86531c1a"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
