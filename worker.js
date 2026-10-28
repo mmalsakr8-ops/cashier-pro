@@ -26,15 +26,54 @@ async function userFrom(req,env){
   const s=await env.DB.prepare("SELECT sessions.id AS sid, users.id, users.name, users.email, users.role FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.token_hash=? AND sessions.expires_at>?").bind(await hash(token),now()).first();
   return s?{...s}:null;
 }
+async function tableColumns(env, table){
+  // Table names passed here are fixed internal constants, never user input.
+  const rows=(await env.DB.prepare(`PRAGMA table_info("${table}")`).all()).results||[];
+  return new Set(rows.map(x=>String(x.name)));
+}
+async function tableExists(env, table){
+  return !!(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first());
+}
 async function context(req,env){
   const user=await userFrom(req,env);if(!user)return {error:json({error:"يجب تسجيل الدخول أولاً"},401)};
-  const restaurant=await env.DB.prepare("SELECT * FROM restaurants WHERE owner_id=?").bind(user.id).first();
-  if(!restaurant)return {error:json({error:"بيانات المطعم غير موجودة"},404)};
+  const raw=await env.DB.prepare("SELECT * FROM restaurants WHERE owner_id=?").bind(user.id).first();
+  if(!raw)return {error:json({error:"بيانات المطعم غير موجودة"},404)};
+  // Support both the older tax_percent/service_percent schema and the newer rate names.
+  const restaurant={...raw,
+    tax_rate:raw.tax_rate ?? raw.tax_percent ?? 14,
+    service_rate:raw.service_rate ?? raw.service_percent ?? 12,
+    tax_number:raw.tax_number ?? "", logo_url:raw.logo_url ?? "", qr_target:raw.qr_target ?? "",
+    phone:raw.phone ?? "", address:raw.address ?? "", currency:raw.currency ?? "EGP"
+  };
   return {user,restaurant};
 }
 async function audit(env,r,u,action,type,id="",details=""){
-  await env.DB.prepare("INSERT INTO audit_logs(id,restaurant_id,user_id,action,entity_type,entity_id,details) VALUES(?,?,?,?,?,?,?)")
-    .bind(uid(),r.id,u.id,action,type,id,String(details).slice(0,2000)).run();
+  // Audit is supplementary: a missing optional audit column must never cancel a saved setting,
+  // invoice, product or expense. Build the INSERT from the real table schema.
+  try{
+    if(!(await tableExists(env,"audit_logs"))) return;
+    const cols=await tableColumns(env,"audit_logs");
+    const values={id:uid(),restaurant_id:r.id,user_id:u.id,action,
+      entity_type:type,entity_id:id,details:String(details).slice(0,2000),created_at:now()};
+    const selected=Object.entries(values).filter(([key])=>cols.has(key));
+    if(!selected.length)return;
+    const names=selected.map(([key])=>`"${key}"`).join(",");
+    const marks=selected.map(()=>"?").join(",");
+    await env.DB.prepare(`INSERT INTO audit_logs(${names}) VALUES(${marks})`).bind(...selected.map(([,value])=>value)).run();
+  }catch(e){console.warn("Audit log skipped without interrupting the main action:",String(e));}
+}
+async function ensureClosingsTable(env){
+  // Some earlier deployments called this table daily_closings. Keep existing data intact,
+  // and create the current table only if it is absent so the current UI can work reliably.
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS closings (
+    id TEXT PRIMARY KEY, restaurant_id TEXT NOT NULL, business_date TEXT NOT NULL,
+    invoice_count INTEGER NOT NULL DEFAULT 0, gross_subtotal REAL NOT NULL DEFAULT 0,
+    discounts REAL NOT NULL DEFAULT 0, net_sales REAL NOT NULL DEFAULT 0, tax_total REAL NOT NULL DEFAULT 0,
+    service_total REAL NOT NULL DEFAULT 0, cash_sales REAL NOT NULL DEFAULT 0, card_sales REAL NOT NULL DEFAULT 0,
+    other_sales REAL NOT NULL DEFAULT 0, expenses_total REAL NOT NULL DEFAULT 0, expected_cash REAL NOT NULL DEFAULT 0,
+    actual_cash REAL NOT NULL DEFAULT 0, cash_difference REAL NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '',
+    closed_by TEXT NOT NULL, closed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'closed'
+  )`).run();
 }
 function csvCell(v){return '"'+String(v??"").replace(/"/g,'""')+'"'}
 async function route(req,env){
@@ -46,7 +85,12 @@ async function route(req,env){
    if(name.length<2||!email.includes("@")||password.length<10)return json({error:"أدخل الاسم والبريد وكلمة مرور لا تقل عن 10 أحرف"},400);
    const existing=await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first();if(existing)return json({error:"البريد الإلكتروني مسجل بالفعل"},409);
    const id=uid();await env.DB.prepare("INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)").bind(id,name,email,await passwordHash(password),"admin").run();
-   const rid=uid();await env.DB.prepare("INSERT INTO restaurants(id,owner_id,name) VALUES(?,?,?)").bind(rid,id,String(b.restaurantName||"مطعمي / كافيهي").trim()).run();
+   const rid=uid(),restaurantName=String(b.restaurantName||"مطعمي / كافيهي").trim()||"مطعمي / كافيهي";
+   const restaurantCols=await tableColumns(env,"restaurants");
+   const restaurantValues={id:rid,owner_id:id,name:restaurantName,phone:"",address:"",tax_number:"",logo_url:"",currency:"EGP",tax_rate:14,service_rate:12,tax_percent:14,service_percent:12,qr_target:""};
+   const restaurantFields=Object.entries(restaurantValues).filter(([key])=>restaurantCols.has(key));
+   await env.DB.prepare(`INSERT INTO restaurants(${restaurantFields.map(([key])=>`"${key}"`).join(",")}) VALUES(${restaurantFields.map(()=>"?").join(",")})`)
+     .bind(...restaurantFields.map(([,value])=>value)).run();
    const token=uid()+uid(),expires=new Date(Date.now()+SESSION_DAYS*86400000).toISOString();
    await env.DB.prepare("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)").bind(uid(),id,await hash(token),expires).run();
    return json({ok:true,user:{id,name,email}},201,{"set-cookie":setCookie(token,SESSION_DAYS*86400)});
@@ -68,8 +112,14 @@ async function route(req,env){
  if(p==="/api/settings"&&method==="PUT"){
    const b=await body(req),name=String(b.name||"").trim();if(name.length<2)return json({error:"اسم المطعم مطلوب"},400);
    const tax=safeNum(b.tax_rate),service=safeNum(b.service_rate);if(tax===null||service===null||tax>100||service>100)return json({error:"نسب الضريبة والخدمة يجب أن تكون بين 0 و100"},400);
-   await env.DB.prepare("UPDATE restaurants SET name=?,phone=?,address=?,tax_number=?,logo_url=?,currency=?,tax_rate=?,service_rate=?,qr_target=? WHERE id=?")
-    .bind(name,String(b.phone||""),String(b.address||""),String(b.tax_number||""),String(b.logo_url||""),String(b.currency||"EGP"),tax,service,String(b.qr_target||""),r.id).run();
+   const cols=await tableColumns(env,"restaurants");
+   const candidates={name,phone:String(b.phone||""),address:String(b.address||""),tax_number:String(b.tax_number||""),
+     logo_url:String(b.logo_url||""),currency:String(b.currency||"EGP"),tax_rate:tax,service_rate:service,
+     tax_percent:tax,service_percent:service,qr_target:String(b.qr_target||"")};
+   const selected=Object.entries(candidates).filter(([key])=>cols.has(key));
+   if(!selected.some(([key])=>key==="name"))return json({error:"تعذر تحديد أعمدة إعدادات المطعم"},500);
+   await env.DB.prepare(`UPDATE restaurants SET ${selected.map(([key])=>`"${key}"=?`).join(",")} WHERE id=?`)
+    .bind(...selected.map(([,value])=>value),r.id).run();
    await audit(env,r,user,"update","settings",r.id,"تحديث إعدادات المطعم");return json({ok:true});
  }
  if(p==="/api/products"&&method==="GET")return json({products:(await env.DB.prepare("SELECT * FROM products WHERE restaurant_id=? ORDER BY name").bind(r.id).all()).results});
@@ -114,6 +164,7 @@ async function route(req,env){
    await audit(env,r,user,"create","expense",id,`${amount}`);return json({ok:true,id},201);
  }
  if(p==="/api/closing"&&method==="POST"){
+   await ensureClosingsTable(env);
    const b=await body(req),date=String(b.date||today()),already=await env.DB.prepare("SELECT id FROM closings WHERE restaurant_id=? AND business_date=? AND status='closed'").bind(r.id,date).first();if(already)return json({error:"تم إغلاق هذا اليوم بالفعل. راجع سجل الإغلاقات."},409);
    const s=await env.DB.prepare(`SELECT COUNT(*) invoice_count,COALESCE(SUM(subtotal),0) gross_subtotal,COALESCE(SUM(discount),0) discounts,COALESCE(SUM(taxable_base),0) net_sales,COALESCE(SUM(tax_amount),0) tax_total,COALESCE(SUM(service_amount),0) service_total,COALESCE(SUM(CASE WHEN payment_method='نقدي' THEN total ELSE 0 END),0) cash_sales,COALESCE(SUM(CASE WHEN payment_method='فيزا / بطاقة' THEN total ELSE 0 END),0) card_sales,COALESCE(SUM(CASE WHEN payment_method NOT IN ('نقدي','فيزا / بطاقة') THEN total ELSE 0 END),0) other_sales FROM invoices WHERE restaurant_id=? AND date=?`).bind(r.id,date).first();
    const ex=await env.DB.prepare("SELECT COALESCE(SUM(amount),0) n FROM expenses WHERE restaurant_id=? AND date=? AND payment_method='نقدي'").bind(r.id,date).first(),actual=safeNum(b.actual_cash);if(actual===null)return json({error:"أدخل النقدية الفعلية"},400);
@@ -122,7 +173,10 @@ async function route(req,env){
    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,r.id,date,s.invoice_count,s.gross_subtotal,s.discounts,s.net_sales,s.tax_total,s.service_total,s.cash_sales,s.card_sales,s.other_sales,ex.n,expected,actual,Math.round((actual-expected)*100)/100,String(b.notes||""),user.id,closed).run();
    await audit(env,r,user,"close","day",id,date);return json({ok:true,closing:{id,date,...s,expenses_total:ex.n,expected_cash:expected,actual_cash:actual,cash_difference:Math.round((actual-expected)*100)/100,notes:String(b.notes||""),closed_at:closed}},201);
  }
- if(p==="/api/closing"&&method==="GET")return json({closings:(await env.DB.prepare("SELECT * FROM closings WHERE restaurant_id=? ORDER BY business_date DESC LIMIT 500").bind(r.id).all()).results});
+ if(p==="/api/closing"&&method==="GET"){
+   await ensureClosingsTable(env);
+   return json({closings:(await env.DB.prepare("SELECT * FROM closings WHERE restaurant_id=? ORDER BY business_date DESC LIMIT 500").bind(r.id).all()).results});
+ }
  if(p==="/api/reports"&&method==="GET"){
    const from=url.searchParams.get("from")||today(),to=url.searchParams.get("to")||today();
    const sales=await env.DB.prepare(`SELECT date,COUNT(*) invoice_count,SUM(subtotal) subtotal,SUM(discount) discounts,SUM(tax_amount) tax,SUM(service_amount) service,SUM(total) total,
@@ -136,7 +190,13 @@ async function route(req,env){
    const lines=[["رقم الفاتورة","التاريخ","وقت الإنشاء","الكاشير","الطاولة","طريقة الدفع","قبل الخصم","الخصم","نسبة الضريبة","الضريبة","نسبة الخدمة","الخدمة","الإجمالي","الحالة"],...rows.map(x=>[x.invoice_no,x.date,x.created_at,x.cashier,x.table_no,x.payment_method,x.subtotal,x.discount,x.tax_rate,x.tax_amount,x.service_rate,x.service_amount,x.total,x.status])];
    return new Response("\ufeff"+lines.map(row=>row.map(csvCell).join(",")).join("\r\n"),{headers:{"content-type":"text/csv; charset=utf-8","content-disposition":`attachment; filename="sales-${from}-${to}.csv"`}});
  }
- if(p==="/api/audit"&&method==="GET")return json({logs:(await env.DB.prepare("SELECT action,entity_type,entity_id,details,created_at FROM audit_logs WHERE restaurant_id=? ORDER BY created_at DESC LIMIT 500").bind(r.id).all()).results});
+ if(p==="/api/audit"&&method==="GET"){
+   if(!(await tableExists(env,"audit_logs")))return json({logs:[]});
+   const cols=await tableColumns(env,"audit_logs");
+   const field=(name)=>cols.has(name)?`"${name}"`:`'' AS "${name}"`;
+   const rows=(await env.DB.prepare(`SELECT ${["action","entity_type","entity_id","details","created_at"].map(field).join(",")} FROM audit_logs WHERE restaurant_id=? ORDER BY created_at DESC LIMIT 500`).bind(r.id).all()).results;
+   return json({logs:rows});
+ }
  return json({error:"المسار غير موجود"},404);
 }
 export default {async fetch(req,env){try{return await route(req,env)}catch(e){console.error("Cashier Pro request failed:", {path:new URL(req.url).pathname, method:req.method, error:String(e?.stack||e)});return json({error:"حدث خطأ في الخادم",request_id:req.headers.get("cf-ray")||"unknown"},500)}}};
