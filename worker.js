@@ -139,4 +139,4 @@ async function route(req,env){
  if(p==="/api/audit"&&method==="GET")return json({logs:(await env.DB.prepare("SELECT action,entity_type,entity_id,details,created_at FROM audit_logs WHERE restaurant_id=? ORDER BY created_at DESC LIMIT 500").bind(r.id).all()).results});
  return json({error:"المسار غير موجود"},404);
 }
-export default {async fetch(req,env){try{return await route(req,env)}catch(e){return json({error:"حدث خطأ في الخادم",detail:env.ENVIRONMENT==="development"?String(e.stack||e):undefined},500)}}};
+export default {async fetch(req,env){try{return await route(req,env)}catch(e){console.error("Cashier Pro request failed:", {path:new URL(req.url).pathname, method:req.method, error:String(e?.stack||e)});return json({error:"حدث خطأ في الخادم",request_id:req.headers.get("cf-ray")||"unknown"},500)}}};
