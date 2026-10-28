@@ -10,7 +10,7 @@ const hex = b => [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).j
 async function hash(s){return hex(await crypto.subtle.digest("SHA-256",enc.encode(s)))}
 async function passwordHash(password,salt=uid()){
   const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);
-  const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt:enc.encode(salt),iterations:120000,hash:"SHA-256"},key,256);
+  const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt:enc.encode(salt),iterations:100000,hash:"SHA-256"},key,256);
   return `pbkdf2$${salt}$${hex(bits)}`;
 }
 async function verifyPassword(password,stored){
