@@ -15,3 +15,9 @@ users, sessions, restaurants, products, invoices, invoice_items, expenses, daily
 - daily_closings.closing_date وtotal_sales وtotal_expenses وcash_total وcard_total
 
 لا حاجة لتنفيذ SQL يدوي لهذا الإصدار.
+
+ميزة طباعة أقسام المطبخ والبار:
+- يضيف worker.js عمود products.station عند الحاجة، والقيمة الافتراضية kitchen.
+- ينشئ جدول order_tickets وجدول order_ticket_items وفهرس الطابور باستخدام CREATE TABLE/INDEX IF NOT EXISTS.
+- لا تشغّل SQL يدويًا؛ الترحيل يتم تلقائيًا من worker.js ويحافظ على البيانات الحالية.
+- الطباعة الصامتة التلقائية تتطلب إعداد الجهاز والمتصفح كما هو موضح في README_AR.txt؛ الكود وحده لا يستطيع اختيار طابعة نظام محددة من المتصفح.
