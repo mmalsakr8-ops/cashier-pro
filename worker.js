@@ -65,18 +65,43 @@ async function route(req,env){
  const url=new URL(req.url),p=url.pathname,method=req.method;
  if(p==="/"&&method==="GET"){try{const a=await env.ASSETS.fetch(req);return a}catch{return html("<h1>Cashier Pro</h1><p>Static assets are not configured.</p>")}}
  if(p==="/api/health")return json({ok:true,service:"cashier-pro",database:!!env.DB});
- // Public invoice page opened by the QR code. It is intentionally read-only and scoped to one invoice.
+ // QR destination: return the receipt as a standalone SVG image, not an editable HTML page.
+ // The image contains a read-only snapshot and exposes no application controls or write API.
  const publicInvoiceMatch=p.match(/^\/i\/([0-9a-f-]+)$/i);
  if(publicInvoiceMatch&&method==="GET"){
   await ensureCompatibility(env);
   const inv=await env.DB.prepare(`SELECT i.*,r.name AS restaurant_name,r.phone AS restaurant_phone,r.address AS restaurant_address,r.tax_number AS restaurant_tax_number,r.logo_url AS restaurant_logo_url,COALESCE(i.invoice_no,i.invoice_number) AS invoice_no,COALESCE(i.date,substr(i.created_at,1,10)) AS date,COALESCE(i.tax_amount,i.tax,0) AS tax_amount,COALESCE(i.service_amount,i.service,0) AS service_amount FROM invoices i JOIN restaurants r ON r.id=i.restaurant_id WHERE i.id=?`).bind(publicInvoiceMatch[1]).first();
-  if(!inv)return html('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>الفاتورة غير موجودة</title><h2>الفاتورة غير موجودة أو لم تعد متاحة.</h2></html>',404);
+  if(!inv)return new Response('الفاتورة غير موجودة أو لم تعد متاحة.',{status:404,headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'}});
   const items=(await env.DB.prepare("SELECT *,COALESCE(name_snapshot,product_name) AS name_snapshot FROM invoice_items WHERE invoice_id=?").bind(inv.id).all()).results||[];
-  const escHtml=v=>String(v??"").replace(/[&<>\"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#39;"}[c]));
-  const moneyFmt=v=>Number(v||0).toLocaleString('ar-EG',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const logo=inv.logo_url_snapshot||inv.restaurant_logo_url||"",name=inv.business_name_snapshot||inv.restaurant_name||"المطعم",taxNo=inv.tax_number_snapshot||inv.restaurant_tax_number||"";
-  const rows=items.map(x=>`<tr><td>${escHtml(x.name_snapshot)}</td><td>${moneyFmt(x.unit_price)}</td><td>${escHtml(x.quantity)}</td><td>${moneyFmt(x.line_total)}</td></tr>`).join("");
-  return html(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>فاتورة ${escHtml(inv.invoice_no)}</title><style>*{box-sizing:border-box}body{margin:0;background:#f3f5f8;color:#182230;font-family:Tahoma,Arial,sans-serif}.tools{max-width:800px;margin:18px auto;padding:0 14px}.btn{border:0;border-radius:9px;background:#235ee8;color:#fff;padding:12px 18px;font:inherit;cursor:pointer}.paper{max-width:800px;margin:0 auto 24px;background:#fff;padding:32px;border:1px solid #e2e6ed;border-radius:12px}.head{text-align:center;border-bottom:2px dashed #aab2bf;padding-bottom:18px;margin-bottom:18px}.logo{display:block;max-width:230px;max-height:145px;object-fit:contain;margin:0 auto 10px}.name{font-size:38px;font-weight:800;letter-spacing:.2px;margin:8px 0 12px;color:#14243a}.meta{line-height:1.5;color:#475467;font-size:12px}h3{text-align:center;margin:16px 0}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:11px 8px;text-align:right;border-bottom:1px solid #e5e7eb;font-size:14px}th{background:#f8fafc}.details{display:flex;justify-content:space-between;gap:20px;line-height:1.65;font-size:12px;margin-top:12px}.totals{max-width:360px;margin:14px 0 0 auto;line-height:1.65;font-size:12px}.grand{font-size:26px;font-weight:bold;border-top:2px solid #14243a;padding-top:10px;margin-top:8px}.thanks{text-align:center;margin-top:24px;padding-top:18px;border-top:1px dashed #aab2bf}.taxbottom{text-align:center;border-top:1px solid #ddd;margin-top:18px;padding-top:9px;font-size:11px;line-height:1.7;color:#475467}@media(max-width:560px){.paper{margin:0 8px 16px;padding:18px 12px;border-radius:0}.name{font-size:30px}.details{gap:8px;font-size:11px}th,td{font-size:12px;padding:8px 4px}}@media print{body{background:#fff}.tools{display:none}.paper{border:0;border-radius:0;margin:0;max-width:none;padding:0}.taxbottom{break-inside:avoid}@page{size:auto;margin:8mm}}</style></head><body><div class="tools"><button class="btn" onclick="window.print()">حفظ الفاتورة PDF / طباعة</button></div><article class="paper"><header class="head">${logo?`<img class="logo" src="${escHtml(logo)}" alt="شعار المطعم" onerror="this.style.display='none'">`:''}<div class="name">${escHtml(name)}</div>${inv.restaurant_phone||inv.phone_snapshot?`<div class="meta">${escHtml(inv.phone_snapshot||inv.restaurant_phone)}</div>`:''}</header><section class="details"><div>رقم الفاتورة: <b>${escHtml(inv.invoice_no)}</b><br>التاريخ: ${escHtml(inv.date||String(inv.created_at||'').slice(0,10))}<br>الطاولة: ${escHtml(inv.table_no||'—')}</div><div>الكاشير: ${escHtml(inv.cashier||'—')}<br>الدفع: ${escHtml(inv.payment_method||'')}</div></section><table><thead><tr><th>الصنف</th><th>السعر</th><th>الكمية</th><th>الإجمالي</th></tr></thead><tbody>${rows}</tbody></table><section class="totals">المجموع: ${moneyFmt(inv.subtotal)}<br>الخصم: ${moneyFmt(inv.discount)}<br>الضريبة (${escHtml(inv.tax_rate??14)}%): ${moneyFmt(inv.tax_amount??inv.tax)}<br>الخدمة (${escHtml(inv.service_rate??12)}%): ${moneyFmt(inv.service_amount??inv.service)}<div class="grand">الإجمالي: ${moneyFmt(inv.total)}</div></section><div class="thanks">شكرًا لزيارتكم${inv.notes?`<br>${escHtml(inv.notes)}`:''}</div>${(taxNo||inv.address_snapshot||inv.restaurant_address)?`<footer class="taxbottom">${taxNo?`الرقم الضريبي: <b>${escHtml(taxNo)}</b>`:''}${(inv.address_snapshot||inv.restaurant_address)?`<br>العنوان: ${escHtml(inv.address_snapshot||inv.restaurant_address)}`:''}</footer>`:''}</article></body></html>`);
+  const escSvg=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&apos;'}[c]));
+  const fmt=v=>Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const rowH=58, tableY=290, rowsEnd=tableY+58+items.length*rowH, totalsY=rowsEnd+32, footerY=totalsY+300, H=footerY+100;
+  const name=inv.business_name_snapshot||inv.restaurant_name||'المطعم',logo=inv.logo_url_snapshot||inv.restaurant_logo_url||'';
+  const texts=[];
+  const txt=(x,y,value,size=24,weight=400,anchor='end',fill='#172334')=>texts.push(`<text x="${x}" y="${y}" font-family="Tahoma,Arial,sans-serif" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" fill="${fill}">${escSvg(value)}</text>`);
+  const line=(y,x1=55,x2=845,stroke='#aab2bf',sw=2)=>texts.push(`<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${stroke}" stroke-width="${sw}"/>`);
+  texts.push(`<rect x="1" y="1" width="898" height="${H-2}" rx="12" fill="#fff" stroke="#d8dee8" stroke-width="2"/>`);
+  if(logo)texts.push(`<image href="${escSvg(logo)}" x="350" y="22" width="200" height="100" preserveAspectRatio="xMidYMid meet"/>`);
+  txt(450,logo?155:85,name,38,800,'middle','#14243a');
+  if(inv.phone_snapshot||inv.restaurant_phone)txt(450,logo?190:120,inv.phone_snapshot||inv.restaurant_phone,20,400,'middle','#475467');
+  line(logo?215:145,55,845,'#9aa4b2',3);
+  txt(845,logo?255:185,`رقم الفاتورة: ${inv.invoice_no}`,21,700);
+  txt(470,logo?255:185,`التاريخ: ${inv.date||''}`,21);
+  txt(845,logo?290:220,`الطاولة: ${inv.table_no||'—'}`,20);
+  txt(470,logo?290:220,`الكاشير: ${inv.cashier||'—'}`,20);
+  const ty=tableY;
+  texts.push(`<rect x="55" y="${ty-38}" width="790" height="52" fill="#f0f3f7" stroke="#667085" stroke-width="2"/>`);
+  txt(825,ty-4,'الصنف',21,700);txt(590,ty-4,'السعر',21,700);txt(390,ty-4,'الكمية',21,700);txt(180,ty-4,'الإجمالي',21,700);
+  items.forEach((it,i)=>{let y=ty+58+i*rowH;texts.push(`<rect x="55" y="${y-42}" width="790" height="${rowH}" fill="#fff" stroke="#c8ced8" stroke-width="1"/>`);txt(825,y-7,it.name_snapshot||it.product_name,19);txt(590,y-7,fmt(it.unit_price),19);txt(390,y-7,it.quantity,19);txt(180,y-7,fmt(it.line_total),19);});
+  const totals=[['المجموع',fmt(inv.subtotal)],['الخصم',fmt(inv.discount)],['الضريبة',fmt(inv.tax_amount??inv.tax)],['الخدمة',fmt(inv.service_amount??inv.service)]];
+  totals.forEach((a,i)=>txt(845,totalsY+i*38,`${a[0]}: ${a[1]}`,21));
+  line(totalsY+165,430,845,'#14243a',3);txt(845,totalsY+210,`الإجمالي: ${fmt(inv.total)}`,30,800,'end','#14243a');
+  if(inv.notes)txt(845,totalsY+250,`ملاحظات: ${inv.notes}`,18);
+  let fy=footerY;if(inv.tax_number_snapshot||inv.restaurant_tax_number)txt(450,fy,`الرقم الضريبي: ${inv.tax_number_snapshot||inv.restaurant_tax_number}`,17,400,'middle','#475467');
+  if(inv.address_snapshot||inv.restaurant_address)txt(450,fy+32,`العنوان: ${inv.address_snapshot||inv.restaurant_address}`,17,400,'middle','#475467');
+  txt(450,H-28,'شكرًا لزيارتكم',22,700,'middle','#14243a');
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="900" height="${H}" viewBox="0 0 900 ${H}">${texts.join('')}</svg>`;
+  return new Response(svg,{headers:{'content-type':'image/svg+xml; charset=utf-8','cache-control':'no-store, private','x-content-type-options':'nosniff','content-disposition':'inline; filename="receipt.svg"'}});
  }
 
  if(p==="/api/auth/register"&&method==="POST"){
