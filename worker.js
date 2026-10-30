@@ -74,7 +74,7 @@ async function route(req,env){
   if(!inv)return new Response('الفاتورة غير موجودة أو لم تعد متاحة.',{status:404,headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'}});
   const items=(await env.DB.prepare("SELECT *,COALESCE(name_snapshot,product_name) AS name_snapshot FROM invoice_items WHERE invoice_id=?").bind(inv.id).all()).results||[];
   const escSvg=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&apos;'}[c]));
-  const fmt=v=>Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const fmt=v=>String(Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})).replace(/\s*(?:ج\.\s*م|جنيه(?:\s+مصري)?|EGP)\s*/gi,' ').trim();
   const rowH=58, tableY=290, rowsEnd=tableY+58+items.length*rowH, totalsY=rowsEnd+32, footerY=totalsY+300, H=footerY+100;
   const name=inv.business_name_snapshot||inv.restaurant_name||'المطعم',logo=inv.logo_url_snapshot||inv.restaurant_logo_url||'';
   const texts=[];
