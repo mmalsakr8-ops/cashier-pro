@@ -48,7 +48,7 @@
 <section id="audit" class="page hidden"><h2>سجل العمليات</h2><div class="panel" id="auditList"></div></section>
 </main></div></div><div id="toast"></div>
 <script>
-const $=id=>document.getElementById(id),money=n=>(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})+' ج.م',today=()=>new Date().toLocaleDateString('en-CA'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=id=>document.getElementById(id),stripCurrency=s=>String(s??'').replace(/\s*(?:ج\.\s*م|جنيه(?:\s+مصري)?|EGP)\s*/gi,' ').trim(),money=n=>stripCurrency((Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})),today=()=>new Date().toLocaleDateString('en-CA'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let me=null,restaurant=null,products=[],invoices=[],expenses=[],closings=[],cart=[],lastInvoice=null;
 let invoiceDesign={themes:[],activeId:""},editingTheme=null;
 async function api(path,opts={}){let r=await fetch(path,{credentials:'same-origin',headers:{'content-type':'application/json',...(opts.headers||{})},...opts});let ct=r.headers.get('content-type')||'';if(!r.ok){let x=ct.includes('json')?await r.json():{error:await r.text()};throw Error(x.error||'حدث خطأ')}return ct.includes('json')?r.json():r}
