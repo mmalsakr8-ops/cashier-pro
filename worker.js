@@ -73,6 +73,7 @@ async function route(req,env){
   const inv=await env.DB.prepare(`SELECT i.*,r.name AS restaurant_name,r.phone AS restaurant_phone,r.address AS restaurant_address,r.tax_number AS restaurant_tax_number,r.logo_url AS restaurant_logo_url,COALESCE(i.invoice_no,i.invoice_number) AS invoice_no,COALESCE(i.date,substr(i.created_at,1,10)) AS date,COALESCE(i.tax_amount,i.tax,0) AS tax_amount,COALESCE(i.service_amount,i.service,0) AS service_amount FROM invoices i JOIN restaurants r ON r.id=i.restaurant_id WHERE i.id=?`).bind(publicInvoiceMatch[1]).first();
   if(!inv)return new Response('الفاتورة غير موجودة أو لم تعد متاحة.',{status:404,headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'}});
   const items=(await env.DB.prepare("SELECT *,COALESCE(name_snapshot,product_name) AS name_snapshot FROM invoice_items WHERE invoice_id=?").bind(inv.id).all()).results||[];
+  let design={};try{design=JSON.parse(inv.invoice_design_snapshot||'{}')}catch{}; if(design.themes)design=design.themes.find(t=>t.id===design.activeId)||design.themes[0]||{}; const theme={width:'80',color:'#14243a',border:'#777777',title:25,font:11,logo:72,phone:true,address:true,taxNo:true,qr:true,discount:true,tax:true,service:true,thanks:'شكرًا لزيارتكم',...design};
   const escSvg=v=>String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&apos;'}[c]));
   const fmt=v=>Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   const rowH=58, tableY=290, rowsEnd=tableY+58+items.length*rowH, totalsY=rowsEnd+32, footerY=totalsY+300, H=footerY+100;
@@ -81,9 +82,11 @@ async function route(req,env){
   const txt=(x,y,value,size=24,weight=400,anchor='end',fill='#172334')=>texts.push(`<text x="${x}" y="${y}" font-family="Tahoma,Arial,sans-serif" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" fill="${fill}">${escSvg(value)}</text>`);
   const line=(y,x1=55,x2=845,stroke='#aab2bf',sw=2)=>texts.push(`<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${stroke}" stroke-width="${sw}"/>`);
   texts.push(`<rect x="1" y="1" width="898" height="${H-2}" rx="12" fill="#fff" stroke="#d8dee8" stroke-width="2"/>`);
-  if(logo)texts.push(`<image href="${escSvg(logo)}" x="350" y="22" width="200" height="100" preserveAspectRatio="xMidYMid meet"/>`);
-  txt(450,logo?155:85,name,38,800,'middle','#14243a');
-  if(inv.phone_snapshot||inv.restaurant_phone)txt(450,logo?190:120,inv.phone_snapshot||inv.restaurant_phone,20,400,'middle','#475467');
+  if(logo)texts.push(`<image href="${escSvg(logo)}" x="${450-(Number(theme.logo)||72)*1.2}" y="22" width="${(Number(theme.logo)||72)*2.4}" height="${Number(theme.logo)||72}" preserveAspectRatio="xMidYMid meet"/>`);
+  txt(450,logo?155:85,name,Number(theme.title)||25,800,'middle',theme.color||'#14243a');
+  if(theme.phone&&(inv.phone_snapshot||inv.restaurant_phone))txt(450,logo?190:120,inv.phone_snapshot||inv.restaurant_phone,20,400,'middle','#475467');
+  if(theme.address&&(inv.address_snapshot||inv.restaurant_address))txt(450,logo?220:150,inv.address_snapshot||inv.restaurant_address,17,400,'middle','#475467');
+  if(theme.taxNo&&(inv.tax_number_snapshot||inv.restaurant_tax_number))txt(450,logo?245:175,`Tax No: ${inv.tax_number_snapshot||inv.restaurant_tax_number}`,16,400,'middle','#475467');
   line(logo?215:145,55,845,'#9aa4b2',3);
   txt(845,logo?255:185,`رقم الفاتورة: ${inv.invoice_no}`,21,700);
   txt(470,logo?255:185,`التاريخ: ${inv.date||''}`,21);
@@ -93,13 +96,12 @@ async function route(req,env){
   texts.push(`<rect x="55" y="${ty-38}" width="790" height="52" fill="#f0f3f7" stroke="#667085" stroke-width="2"/>`);
   txt(825,ty-4,'الصنف',21,700);txt(590,ty-4,'السعر',21,700);txt(390,ty-4,'الكمية',21,700);txt(180,ty-4,'الإجمالي',21,700);
   items.forEach((it,i)=>{let y=ty+58+i*rowH;texts.push(`<rect x="55" y="${y-42}" width="790" height="${rowH}" fill="#fff" stroke="#c8ced8" stroke-width="1"/>`);txt(825,y-7,it.name_snapshot||it.product_name,19);txt(590,y-7,fmt(it.unit_price),19);txt(390,y-7,it.quantity,19);txt(180,y-7,fmt(it.line_total),19);});
-  const totals=[['المجموع',fmt(inv.subtotal)],['الخصم',fmt(inv.discount)],['الضريبة',fmt(inv.tax_amount??inv.tax)],['الخدمة',fmt(inv.service_amount??inv.service)]];
+  const totals=[['Net Sales',fmt(inv.taxable_base??(Number(inv.subtotal||0)-Number(inv.discount||0)))],...(theme.discount!==false&&Number(inv.discount||0)>0?[['Discount',fmt(inv.discount)]]:[]),...(theme.tax!==false?[['VAT',fmt(inv.tax_amount??inv.tax)]]:[]),...(theme.service!==false?[['Service',fmt(inv.service_amount??inv.service)]]:[])];
   totals.forEach((a,i)=>txt(845,totalsY+i*38,`${a[0]}: ${a[1]}`,21));
   line(totalsY+165,430,845,'#14243a',3);txt(845,totalsY+210,`الإجمالي: ${fmt(inv.total)}`,30,800,'end','#14243a');
   if(inv.notes)txt(845,totalsY+250,`ملاحظات: ${inv.notes}`,18);
-  let fy=footerY;if(inv.tax_number_snapshot||inv.restaurant_tax_number)txt(450,fy,`الرقم الضريبي: ${inv.tax_number_snapshot||inv.restaurant_tax_number}`,17,400,'middle','#475467');
-  if(inv.address_snapshot||inv.restaurant_address)txt(450,fy+32,`العنوان: ${inv.address_snapshot||inv.restaurant_address}`,17,400,'middle','#475467');
-  txt(450,H-28,'شكرًا لزيارتكم',22,700,'middle','#14243a');
+  let fy=footerY;if(theme.taxNo&&(inv.tax_number_snapshot||inv.restaurant_tax_number))txt(450,fy,`Tax No: ${inv.tax_number_snapshot||inv.restaurant_tax_number}`,17,400,'middle','#475467');
+  txt(450,H-28,theme.thanks||'شكرًا لزيارتكم',22,700,'middle',theme.color||'#14243a');
   const svg=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="900" height="${H}" viewBox="0 0 900 ${H}">${texts.join('')}</svg>`;
   return new Response(svg,{headers:{'content-type':'image/svg+xml; charset=utf-8','cache-control':'no-store, private','x-content-type-options':'nosniff','content-disposition':'inline; filename="receipt.svg"'}});
  }
@@ -149,7 +151,7 @@ async function route(req,env){
   const taxRate=b.tax_rate===undefined?r.tax_rate:safeNum(b.tax_rate),serviceRate=b.service_rate===undefined?r.service_rate:safeNum(b.service_rate);if(taxRate===null||serviceRate===null||taxRate>100||serviceRate>100)return json({error:"نسبة ضريبة أو خدمة غير صحيحة"},400);
   const base=round(subtotal-discount),tax=round(base*taxRate/100),service=round(base*serviceRate/100),total=round(base+tax+service),seq=await env.DB.prepare("SELECT COALESCE(MAX(invoice_number),0)+1 AS n FROM invoices WHERE restaurant_id=?").bind(r.id).first(),num=seq.n,id=uid(),created=now(),date=created.slice(0,10),payment=String(b.payment_method||"نقدي"),allowed=["نقدي","فيزا / بطاقة","محفظة إلكترونية","آجل"];
   if(!allowed.includes(payment))return json({error:"طريقة الدفع غير صحيحة"},400);
-  const invCols=await tableColumns(env,"invoices"),invVals={id,restaurant_id:r.id,invoice_number:num,invoice_no:num,subtotal,discount,tax,service,total,payment_method:payment,status:payment==="آجل"?"unpaid":"paid",created_at:created,date,business_name_snapshot:r.name,phone_snapshot:r.phone,address_snapshot:r.address,tax_number_snapshot:r.tax_number,logo_url_snapshot:r.logo_url,invoice_design_snapshot:String(r.invoice_design||'{}'),table_no:String(b.table_no||""),station:String(b.station||"InDoor"),persons_count:Math.max(1,Math.floor(Number(b.persons_count)||1)),cashier:String(b.cashier||""),order_type:String(b.order_type||"داخل المطعم"),taxable_base:base,tax_rate:taxRate,tax_amount:tax,service_rate:serviceRate,service_amount:service,notes:String(b.notes||""),created_by:user.id},invFields=Object.entries(invVals).filter(([k])=>invCols.has(k));
+  const invCols=await tableColumns(env,"invoices"),invVals={id,restaurant_id:r.id,invoice_number:num,invoice_no:num,subtotal,discount,tax,service,total,payment_method:payment,status:payment==="آجل"?"unpaid":"paid",created_at:created,date,business_name_snapshot:r.name,phone_snapshot:r.phone,address_snapshot:r.address,tax_number_snapshot:r.tax_number,logo_url_snapshot:r.logo_url,invoice_design_snapshot:(()=>{try{const d=JSON.parse(r.invoice_design||'{}');return JSON.stringify((d.themes||[]).find(t=>t.id===d.activeId)||(d.themes||[])[0]||{})}catch{return '{}'}})(),table_no:String(b.table_no||""),station:String(b.station||"InDoor"),persons_count:Math.max(1,Math.floor(Number(b.persons_count)||1)),cashier:String(b.cashier||""),order_type:String(b.order_type||"داخل المطعم"),taxable_base:base,tax_rate:taxRate,tax_amount:tax,service_rate:serviceRate,service_amount:service,notes:String(b.notes||""),created_by:user.id},invFields=Object.entries(invVals).filter(([k])=>invCols.has(k));
   const stmts=[env.DB.prepare(`INSERT INTO invoices(${invFields.map(([k])=>`"${k}"`).join(",")}) VALUES(${invFields.map(()=>"?").join(",")})`).bind(...invFields.map(([,v])=>v))];
   const itemCols=await tableColumns(env,"invoice_items");for(const x of clean){const vals={id:x.id,invoice_id:id,product_id:x.product_id,product_name:x.name,name_snapshot:x.name,unit_price:x.price,quantity:x.qty,line_total:x.line},fields=Object.entries(vals).filter(([k])=>itemCols.has(k));stmts.push(env.DB.prepare(`INSERT INTO invoice_items(${fields.map(([k])=>`"${k}"`).join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...fields.map(([,v])=>v)))}
   await env.DB.batch(stmts);await audit(env,r,user,"create","invoice",id,`فاتورة ${num} بإجمالي ${total}`);return json({ok:true,id,invoice_no:num,subtotal,discount,tax_rate:taxRate,tax_amount:tax,service_rate:serviceRate,service_amount:service,total},201);
@@ -185,4 +187,4 @@ async function route(req,env){
  }
  return json({error:"المسار غير موجود"},404);
 }
-export default {async fetch(req,env){try{return await route(req,env)}catch(e){console.error("Cashier Pro request failed:",{path:new URL(req.url).pathname,method:req.method,error:String(e?.stack||e)});return json({error:"حدث خطأ في الخادم",request_id:req.headers.get("cf-ray")||"unknown"},500)}}};
+export default {async fetch(req,env){try{const path=new URL(req.url).pathname;if((path==="/"||path==="/manifest.webmanifest"||path==="/sw.js"||path.startsWith("/icons/"))&&env.ASSETS){const asset=await env.ASSETS.fetch(req);if(path==="/sw.js"&&asset.ok){const h=new Headers(asset.headers);h.set("content-type","application/javascript; charset=utf-8");h.set("cache-control","no-cache");h.set("service-worker-allowed","/");return new Response(asset.body,{status:asset.status,headers:h})}return asset}return await route(req,env)}catch(e){console.error("Cashier Pro request failed:",{path:new URL(req.url).pathname,method:req.method,error:String(e?.stack||e)});return json({error:"حدث خطأ في الخادم",request_id:req.headers.get("cf-ray")||"unknown"},500)}}};
